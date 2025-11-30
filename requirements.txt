@@ -1,0 +1,12 @@
+streamlit
+torch
+torchvision
+opencv-python
+pydicom
+pandas
+numpy
+scikit-image
+tqdm
+Pillow
+requests
+huggingface_hub
