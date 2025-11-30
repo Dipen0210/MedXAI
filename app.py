@@ -1,5 +1,8 @@
 import streamlit as st
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 from PIL import Image
 import numpy as np
 import cv2

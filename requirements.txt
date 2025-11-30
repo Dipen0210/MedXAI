@@ -10,3 +10,4 @@ tqdm
 Pillow
 requests
 huggingface_hub
+python-dotenv
