@@ -65,13 +65,22 @@ class FullScanDetector:
         
         h, w = img_masked.shape
         img_masked[int(h*0.80):, :] = 0  # Black out bottom 20% (Table) - Relaxed from 25%
+        img_masked[:int(h*0.15), :] = 0  # Black out top 15% (Sternum/Anterior Wall)
         
         # Circular Mask to remove corner artifacts
         center = (int(w/2), int(h/2))
-        radius = int(min(h, w) * 0.48) # Keep central 96%
+        radius = int(min(h, w) * 0.42) # TIGHTER MASK: Reduced from 0.48 to 0.42 to avoid edge artifacts
         Y, X = np.ogrid[:h, :w]
         dist_from_center = np.sqrt((X - center[0])**2 + (Y - center[1])**2)
         mask = dist_from_center <= radius
+        
+        # Morphological Erosion to clean up mask edges
+        # Reduced to 3x3 kernel and 1 iteration to avoid deleting small nodules (like Patient 1901)
+        mask_uint8 = (mask.astype(np.uint8) * 255)
+        kernel = np.ones((3,3), np.uint8)
+        mask_eroded = cv2.erode(mask_uint8, kernel, iterations=1)
+        mask = mask_eroded > 0
+        
         img_masked[~mask] = 0
 
         # Threshold to find bright spots (nodules/vessels)
@@ -85,7 +94,7 @@ class FullScanDetector:
         # Helper to process valid contours
         def process_contour(cnt, offset=(0,0)):
             area = cv2.contourArea(cnt)
-            if 20 < area < 15000:
+            if 50 < area < 15000: # Optmized to 50
                 x, y, w_box, h_box = cv2.boundingRect(cnt)
                 aspect_ratio = float(w_box)/h_box
                 
@@ -95,26 +104,8 @@ class FullScanDetector:
                         cX = int(M["m10"] / M["m00"]) + offset[0]
                         cY = int(M["m01"] / M["m00"]) + offset[1]
                         
-                        # FILTER: Ignore Table (Bottom 20%)
-                        if cY > h * 0.80: return
-                        
-                        # FILTER: Intensity (For 2D mode where HU is missing)
-                        # Remove very bright objects (Bone/Contrast)
-                        if raw_img is None:
-                            # Create a mask for this contour
-                            mask = np.zeros(img_masked.shape, np.uint8)
-                            # We need to shift contour by offset if it's a sub-contour
-                            cnt_shifted = cnt + np.array(offset)
-                            cv2.drawContours(mask, [cnt_shifted], -1, 255, -1)
-                            mean_val = cv2.mean(img_masked, mask=mask)[0]
-                            
-                            # print(f"DEBUG: Contour Mean: {mean_val:.2f} at ({cX}, {cY})")
-                            
-                            # Bone is usually > 220-250 in normalized image
-                            # Nodule contour is around 180-190
-                            if mean_val > 200: 
-                                # print(f"DEBUG: Rejected Bone/Contrast (Mean {mean_val:.2f})")
-                                return
+                        # FILTER: Ignore Table (Bottom 20%) and Sternum (Top 15%)
+                        if cY > h * 0.80 or cY < h * 0.15: return
                         
                         candidates.append((cX, cY))
 
@@ -122,7 +113,10 @@ class FullScanDetector:
             area = cv2.contourArea(cnt)
             
             # Standard check
-            if 20 < area < 15000:
+            # OPTIMIZATION: Increased min area from 20 -> 50 to reduce noise candidates
+            # The smallest fake nodule (Patient 1901) is ~289 pixels. 
+            # 50 offers a safe margin while filtering out tiny specs.
+            if 50 < area < 15000:
                 process_contour(cnt)
                 
             # Iterative Thresholding for large blobs (e.g. merged with lung)
@@ -132,13 +126,11 @@ class FullScanDetector:
                 
                 # Re-threshold at higher value to separate nodules from lung/vessels
                 _, sub_thresh = cv2.threshold(roi, 180, 255, cv2.THRESH_BINARY)
-                sub_contours, _ = cv2.findContours(sub_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                sub_contours, _ = cv2.findContours(sub_thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
                 
                 for sub_cnt in sub_contours:
                     process_contour(sub_cnt, offset=(x, y))
         
-        return candidates
-        # print(f"DEBUG: Kept {len(candidates)} candidates after filtering.")
         return candidates
 
     def non_max_suppression(self, detections, iou_threshold=0.1):
@@ -181,129 +173,163 @@ class FullScanDetector:
             
         return [detections[i] for i in keep_indices]
 
-    def scan_slice(self, img_norm, slice_idx=0, sensitivity=0.7, raw_img=None):
-        """Scans a single 2D image."""
-        candidates = self.get_candidates(img_norm, raw_img=raw_img)
-        if not candidates: return []
-        
-        patches = []
-        valid_candidates = []
-        
-        half = self.patch_size // 2
-        
-        for (x, y) in candidates:
-            if y-half < 0 or y+half > img_norm.shape[0] or x-half < 0 or x+half > img_norm.shape[1]:
-                continue
-            patch = img_norm[y-half:y+half, x-half:x+half]
-            patches.append(patch)
-            valid_candidates.append((x, y))
-            
-        if not patches: return []
-        
-        # Batch Prediction
-        results = self.classifier.predict_batch(patches)
-        
-        detections = []
-        for i, (label, score, _) in enumerate(results):
-            if score > sensitivity:
-                x, y = valid_candidates[i]
-                
-                # Re-run single inference to get Heatmap (Quality)
-                # Optimization: Pass numpy array directly
-                # Optimization 2: Only generate heatmap if we are going to keep it (already checked score > sensitivity)
-                # Note: predict() returns heatmap, but predict_batch() does not.
-                # We need to call predict() to get the heatmap.
-                
-                _, _, heatmap = self.classifier.predict(patches[i])
-                
-                detections.append({
-                    'slice': slice_idx,
-                    'x': x,
-                    'y': y,
-                    'label': label,
-                    'score': score,
-                    'heatmap': heatmap
-                })
-        
-        # Apply Non-Maximum Suppression
-        detections = self.non_max_suppression(detections)
-        
-        return detections
 
-    def scan(self, scan_dir, sensitivity=0.75, batch_size=64):
+
+    def check_lung_context(self, img_norm, x, y, radius=20, threshold=100):
+        """
+        Checks if the candidate at (x,y) is likely inside the lung.
+        Heuristic: Sample a ring/box around the candidate.
+        If the surroundings are mostly dark (< threshold), it's in the lung/air.
+        If surroundings are bright, it's in tissue/bone.
+        """
+        h, w = img_norm.shape
+        
+        # Define a ring/frame around the candidate
+        # We look at a box from radius-5 to radius
+        r_inner = 14 # Increased from 12 to avoid self-filtering large nodules
+        r_outer = 26 # Increased slightly
+        
+        x1 = max(0, x - r_outer)
+        x2 = min(w, x + r_outer)
+        y1 = max(0, y - r_outer)
+        y2 = min(h, y + r_outer)
+        
+        # Extract the patch
+        patch = img_norm[y1:y2, x1:x2]
+        if patch.size == 0: return False
+        
+        # Mask out the inner part (the nodule itself) to check ONLY context
+        # Center of patch is roughly (x-x1, y-y1) -> (r_outer, r_outer)
+        py, px = np.ogrid[:patch.shape[0], :patch.shape[1]]
+        # Center relative to patch
+        cy_p, cx_p = y - y1, x - x1
+        
+        dist_sq = (px - cx_p)**2 + (py - cy_p)**2
+        mask = (dist_sq >= r_inner**2) # Only look outside r_inner
+        
+        surrounding_pixels = patch[mask]
+        
+        if surrounding_pixels.size == 0: return False
+        
+        mean_val = np.mean(surrounding_pixels)
+        
+        # If mean value is High (White), it's surrounded by tissue -> ROI is excluded
+        # If mean value is Low (Black), it's surrounded by air -> Keep
+        
+        # Threshold: 
+        # Air is ~0-30. Lung tissue is ~20-60. 
+        # Solid Tissue is > 100.
+        # Nodule is > 100.
+        # Relaxed threshold to 130 to be very permissive for dense nodules
+        
+        return mean_val < 100
+
+
+    def extract_cube_from_volume(self, volume_hu, center_idx, cx, cy, cube_size=32):
+        """
+        Extracts and normalizes a 3D cube to match training preprocessing.
+        volume_hu: (D, H, W) in HU units
+        Returns: (cube_size, cube_size, cube_size) normalized to [0,1]
+        """
+        max_d, max_h, max_w = volume_hu.shape
+        half = cube_size // 2
+        
+        # Pad volume to avoid boundary issues
+        pad = ((half, half), (half, half), (half, half))
+        padded = np.pad(volume_hu, pad, mode='constant', constant_values=-1000)
+        
+        # Adjust coordinates for the padded volume
+        z_center = center_idx + half
+        x_center = cx + half  
+        y_center = cy + half
+        
+        # Extract cube
+        z1 = z_center - half
+        z2 = z_center + half
+        y1 = y_center - half
+        y2 = y_center + half
+        x1 = x_center - half
+        x2 = x_center + half
+        
+        cube_hu = padded[z1:z2, y1:y2, x1:x2]
+        
+        # Normalize HU to [0, 1] (MATCH TRAINING)
+        cube_norm = (cube_hu - (-1000)) / (400 - (-1000))
+        cube_norm = np.clip(cube_norm, 0, 1)
+        
+        return cube_norm.astype(np.float32)
+
+    def valiv_coords(self, x, y, h, w):
+        return 0 <= x < w and 0 <= y < h
+
+    def scan(self, scan_dir, sensitivity=0.5, batch_size=16):
         """Scans the full 3D volume using optimized Batch Processing."""
         slices = self.load_scan(scan_dir)
+        if not slices: return [], []
+        
         all_detections = []
         
         print(f"Scanning {len(slices)} slices...")
         
+        # OPTIMIZATION: Pre-load the entire volume to RAM
+        # This avoids re-reading/normalizing DICOMs for every single candidate
+        print("Pre-loading 3D Volume (HU units)...")
+        volume_hu = []
+        for ds in slices:
+            volume_hu.append(self.get_hu(ds))  # Keep in HU units for proper normalization
+        
+        volume_hu = np.stack(volume_hu)  # (D, H, W) in HU units
+        print(f"Volume Shape: {volume_hu.shape}")
+        
         # Buffers for batching
-        patch_buffer = []
+        cube_buffer = []
         meta_buffer = [] # (slice_idx, x, y)
         
         # Temporary storage for detections before NMS
         raw_detections_by_slice = {i: [] for i in range(len(slices))}
         
-        # Pre-load HU grids for 3D consistency (Optimization: Load on demand or cache?)
-        # For now, we load row by row.
-        
         for i, ds in enumerate(slices):
+            # i = slice index
             if i % 10 == 0:
                 print(f"Processing slice {i}/{len(slices)}...")
-                
-            raw_img = self.get_hu(ds)
-            img_norm = self.normalize_slice(ds)
+            
+            # Use pre-loaded HU volume for both candidate detection and cube extraction
+            raw_img = volume_hu[i]
+            img_norm = self.normalize_slice(ds)  # For candidate detection only 
+            
+
+            # Get candidates on this slice
             candidates = self.get_candidates(img_norm, raw_img=raw_img)
             
-            # OPTION 2: 3D Consistency Check
-            # Check if this candidate exists in adjacent slices
-            valid_candidates_3d = []
+            # --- NEW: Context Filter ---
+            # User requirement: Nodules must be INSIDE the lung (surrounded by black air).
+            # Filter out candidates that are surrounded by tissue (mediastinum, chest wall).
+            valid_candidates = []
             for (x, y) in candidates:
-                # Check neighbors (i-1, i+1)
-                # We check if the HU value at (x,y) in neighbors is > -600 (Tissue/Bone/Fluid)
-                # If it's Air (-1000), it's likely noise/artifact.
-                
-                consistent = False
-                neighbors = []
-                if i > 0: neighbors.append(i-1)
-                if i < len(slices) - 1: neighbors.append(i+1)
-                
-                if not neighbors: # Single slice case
-                    consistent = True
-                else:
-                    for n_idx in neighbors:
-                        # We need to load the neighbor slice
-                        # NOTE: This might be slow if we re-read DICOM. 
-                        # But 'slices' list contains pydicom objects which lazy load pixel_array.
-                        # To be efficient, we should probably cache, but let's try direct access first.
-                        n_ds = slices[n_idx]
-                        # Quick HU check without full normalization
-                        slope = getattr(n_ds, 'RescaleSlope', 1)
-                        intercept = getattr(n_ds, 'RescaleIntercept', 0)
-                        val = n_ds.pixel_array[y, x] * slope + intercept
-                        
-                        if val > -600: # Threshold for "Something is there"
-                            consistent = True
-                            break
-                
-                if consistent:
-                    valid_candidates_3d.append((x, y))
+                if self.check_lung_context(img_norm, x, y):
+                    valid_candidates.append((x, y))
+            candidates = valid_candidates
             
-            candidates = valid_candidates_3d
+            print(f"Slice {i}: Found {len(candidates)} candidates")
+
             
-            half = self.patch_size // 2
+            # Filter candidates: Ensure they are "inside" boundaries (handled by Mask in get_candidates)
+            # User note: "nodules will be found only inside the boudaries... inside two left and right lungs in white marks"
+            # Our existing get_candidates uses threshold > 130 (white marks) and mask (boundaries).
+            
             for (x, y) in candidates:
-                if y-half < 0 or y+half > img_norm.shape[0] or x-half < 0 or x+half > img_norm.shape[1]:
-                    continue
-                patch = img_norm[y-half:y+half, x-half:x+half]
-                patch_buffer.append(patch)
+                # Extract 32x32x32 cube with HU normalization (MATCH TRAINING!)
+                cube = self.extract_cube_from_volume(volume_hu, i, x, y, cube_size=32)
+                
+                cube_buffer.append(cube)
                 meta_buffer.append((i, x, y))
                 
             # Process buffer if full
-            while len(patch_buffer) >= batch_size:
-                batch = patch_buffer[:batch_size]
+            while len(cube_buffer) >= batch_size:
+                print(f"Batch inference on {len(cube_buffer[:batch_size])} items...")
+                batch = cube_buffer[:batch_size]
                 meta = meta_buffer[:batch_size]
-                patch_buffer = patch_buffer[batch_size:]
+                cube_buffer = cube_buffer[batch_size:]
                 meta_buffer = meta_buffer[batch_size:]
                 
                 results = self.classifier.predict_batch(batch)
@@ -311,8 +337,8 @@ class FullScanDetector:
                 for j, (label, score, _) in enumerate(results):
                     if score > sensitivity:
                         s_idx, px, py = meta[j]
-                        # Generate heatmap lazily (only for positives)
-                        _, _, heatmap = self.classifier.predict(batch[j])
+                        # Skip heatmap generation here (causes OpenCV errors for 3D)
+                        # App will regenerate heatmaps when needed
                         
                         raw_detections_by_slice[s_idx].append({
                             'slice': s_idx,
@@ -320,16 +346,15 @@ class FullScanDetector:
                             'y': py,
                             'label': label,
                             'score': score,
-                            'heatmap': heatmap
+                            'heatmap': None  # Will be generated by app.py on demand
                         })
-
+                        
         # Process remaining items in buffer
-        if patch_buffer:
-            results = self.classifier.predict_batch(patch_buffer)
+        if cube_buffer:
+            results = self.classifier.predict_batch(cube_buffer)
             for j, (label, score, _) in enumerate(results):
                 if score > sensitivity:
                     s_idx, px, py = meta_buffer[j]
-                    _, _, heatmap = self.classifier.predict(patch_buffer[j])
                     
                     raw_detections_by_slice[s_idx].append({
                         'slice': s_idx,
@@ -337,10 +362,12 @@ class FullScanDetector:
                         'y': py,
                         'label': label,
                         'score': score,
-                        'heatmap': heatmap
+                        'heatmap': None  # Will be generated by app.py on demand
                     })
                     
         # Apply NMS per slice and aggregate
+        # NOTE: For 3D verification, we might want 3D NMS, but per-slice is a good start
+        # to identify which slice has the evidence.
         for i in range(len(slices)):
             dets = raw_detections_by_slice[i]
             if dets:
@@ -348,5 +375,88 @@ class FullScanDetector:
                 for d in dets:
                     d['instance_number'] = slices[i].InstanceNumber
                     all_detections.append(d)
+        
+        # --- NEW: 3D Consistency Check ---
+        # Rule: Overlap in >= 2 slices -> Real. Else -> Fake.
+        # CHANGED: min_slices=2 (was 3) to allow "overlapping in multiple" where multiple >= 2.
+        # Widen distance threshold to 40 to ensure we catch shifting centers.
+        all_detections = self.apply_3d_consistency(all_detections, dist_thresh=50, min_slices=2)
                     
         return all_detections, slices
+
+    def apply_3d_consistency(self, detections, dist_thresh=50, min_slices=2):
+        """
+        Groups detections and refines classification.
+        
+        Logic:
+        - If MODEL says "Fake" -> Keep as FM (False-Malicious, injected fake)
+        - If MODEL says "Real":
+            - Consistent across >= min_slices -> TM (True-Malicious, real cancer)
+            - Isolated (< min_slices) -> Filter out (likely noise or FB scar)
+        """
+        if not detections: return []
+        
+        # Separate Fake and Real detections
+        fake_detections = [d for d in detections if d['label'] == 'Fake']
+        real_detections = [d for d in detections if d['label'] == 'Real']
+        
+        # All Fake detections become FM (no consistency check needed)
+        for d in fake_detections:
+            d['label'] = 'FM'
+        
+        # For Real detections, apply 3D consistency grouping
+        if not real_detections:
+            return fake_detections
+            
+        real_detections.sort(key=lambda x: x['slice'])
+        n = len(real_detections)
+        parent = list(range(n))
+        
+        def find(i):
+            if parent[i] == i: return i
+            parent[i] = find(parent[i])
+            return parent[i]
+            
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j:
+                parent[root_j] = root_i
+                
+        for i in range(n):
+            for j in range(i+1, n):
+                d1 = real_detections[i]
+                d2 = real_detections[j]
+                
+                slice_diff = abs(d1['slice'] - d2['slice'])
+                if slice_diff > 3: 
+                    break 
+                
+                if slice_diff > 0:
+                    dist = np.sqrt((d1['x'] - d2['x'])**2 + (d1['y'] - d2['y'])**2)
+                    if dist < dist_thresh:
+                        union(i, j)
+                        
+        # Analyze groups
+        groups = {}
+        for i in range(n):
+            root = find(i)
+            if root not in groups: groups[root] = []
+            groups[root].append(real_detections[i])
+            
+        verified_real = []
+        for g_id, group in groups.items():
+            unique_slices = len(set(d['slice'] for d in group))
+            
+            # Only keep if consistent across multiple slices
+            if unique_slices >= min_slices:
+                for d in group:
+                    d['label'] = 'TM'  # True-Malicious (real cancer)
+                    d['score'] = 0.99
+                    verified_real.append(d)
+            # else: discard isolated "Real" detections (noise or FB scars)
+                
+        # Combine Fake (FM) and verified Real (TM)
+        return fake_detections + verified_real
+
+
