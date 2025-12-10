@@ -13,13 +13,6 @@ The application provides a user-friendly interface built with Streamlit, designe
 -   **LLM Explainer:** Integrates with a Large Language Model (Llama-3 via Hugging Face) to provide natural language explanations of the findings.
 -   **3D Volume Scanning:** Processes complete DICOM series to find anomalies across the entire volume with inter-slice consistency checks.
 
-## output
-<img width="1113" height="773" alt="Screenshot 2025-12-08 at 9 01 30 PM" src="https://github.com/user-attachments/assets/25d53028-0eac-456a-b483-a96d976736c2" />
-
-<img width="1101" height="722" alt="Screenshot 2025-12-08 at 9 09 05 PM" src="https://github.com/user-attachments/assets/e8f868eb-a9c5-48a2-be71-c2c161ed619e" />
-
-
-
 ## Usage
 
 1.  **Run the Streamlit App:**
@@ -31,6 +24,19 @@ The application provides a user-friendly interface built with Streamlit, designe
     -   Upload your DICOM files.
     -   Ensure the `Model Path` is correct (default: `model.pth`).
     -   View the results, heatmaps, and AI explanations.
+
+## output
+
+1.  **Real Cancer Detection:**
+
+<img width="1113" height="773" alt="Screenshot 2025-12-08 at 9 01 30 PM" src="https://github.com/user-attachments/assets/25d53028-0eac-456a-b483-a96d976736c2" />
+
+2.  **Fake Cancer Detection:**
+
+<img width="1101" height="722" alt="Screenshot 2025-12-08 at 9 09 05 PM" src="https://github.com/user-attachments/assets/e8f868eb-a9c5-48a2-be71-c2c161ed619e" />
+
+
+
 
 ## Project Structure
 
