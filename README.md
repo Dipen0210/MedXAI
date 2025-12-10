@@ -13,30 +13,12 @@ The application provides a user-friendly interface built with Streamlit, designe
 -   **LLM Explainer:** Integrates with a Large Language Model (Llama-3 via Hugging Face) to provide natural language explanations of the findings.
 -   **3D Volume Scanning:** Processes complete DICOM series to find anomalies across the entire volume with inter-slice consistency checks.
 
-## Installation
+## output
+<img width="1113" height="773" alt="Screenshot 2025-12-08 at 9 01 30 PM" src="https://github.com/user-attachments/assets/25d53028-0eac-456a-b483-a96d976736c2" />
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository-url>
-    cd <repository-directory>
-    ```
+<img width="1101" height="722" alt="Screenshot 2025-12-08 at 9 09 05 PM" src="https://github.com/user-attachments/assets/e8f868eb-a9c5-48a2-be71-c2c161ed619e" />
 
-2.  **Create a virtual environment (optional but recommended):**
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-    ```
 
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4.  **Environment Variables:**
-    Create a `.env` file in the root directory and add your Hugging Face token for the LLM explainer:
-    ```env
-    HF_TOKEN=your_hugging_face_token_here
-    ```
 
 ## Usage
 
@@ -67,7 +49,3 @@ The application provides a user-friendly interface built with Streamlit, designe
 -   **Image Processing:** OpenCV, PIL, scikit-image
 -   **Medical Imaging:** pydicom
 -   **LLM Integration:** Hugging Face Hub
-
-## License
-
-[Add License Information Here]
