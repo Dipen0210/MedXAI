@@ -31,6 +31,7 @@ The application provides a user-friendly interface built with Streamlit, designe
 
 <img width="1113" height="773" alt="Screenshot 2025-12-08 at 9 01 30 PM" src="https://github.com/user-attachments/assets/25d53028-0eac-456a-b483-a96d976736c2" />
 
+
 2.  **Fake Cancer Detection:**
 
 <img width="1101" height="722" alt="Screenshot 2025-12-08 at 9 09 05 PM" src="https://github.com/user-attachments/assets/e8f868eb-a9c5-48a2-be71-c2c161ed619e" />
