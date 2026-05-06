@@ -44,13 +44,13 @@ streamlit run app.py
 
 ## Output
 
-**Tampered Scan Detected (FM):**
-
-<img width="1101" height="722" alt="Tampered scan detection" src="https://github.com/user-attachments/assets/e8f868eb-a9c5-48a2-be71-c2c161ed619e" />
-
 **Authentic Nodule Detected (TM):**
 
-<img width="1113" height="773" alt="Real cancer detection" src="https://github.com/user-attachments/assets/25d53028-0eac-456a-b483-a96d976736c2" />
+<img width="1122" height="768" alt="Screenshot 2025-12-08 at 9 01 54 PM" src="https://github.com/user-attachments/assets/6404fa0d-7b56-4bd4-bc4a-95c317d2a483" />
+
+**Tampered Scan Detected (FM):**
+
+<img width="1101" height="722" alt="Screenshot 2025-12-08 at 9 09 05 PM" src="https://github.com/user-attachments/assets/f9b3a1ff-84ec-4ebf-b119-540ca5e55bed" />
 
 ## Project Structure
 
