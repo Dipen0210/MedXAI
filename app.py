@@ -34,13 +34,14 @@ st.sidebar.header("Configuration")
 # mode = st.sidebar.radio("Mode", ["Classify Cropped Patch", "Full 3D Scan (DICOM)"]) # Removed
 model_path = st.sidebar.text_input("Model Path", "rsmodel.pth")
 
-def load_detector(path):
-    if not os.path.exists(path): return None
-    return MedicalDeepfakeDetector(path)
-
+@st.cache_resource
 def load_scanner(path):
     if not os.path.exists(path): return None
     return FullScanDetector(path)
+
+@st.cache_resource
+def load_explainer():
+    return LLMExplainer(os.environ.get("HF_TOKEN"))
 
 # --- FULL 3D SCAN MODE ---
 st.subheader("Full 3D Scan Detection (DICOM + ResNet3D)")
@@ -50,19 +51,14 @@ st.write("• **Cancer removal**: Digitally erased cancer regions (FB)")
 st.write("• **Authentic nodules**: Real cancer detections (TM)")
 st.write("*Note: Ensure the uploaded series is continuous for accurate 3D context.*")
 
-
 scanner = load_scanner(model_path)
 if not scanner:
     st.error("Model not found!")
     st.stop()
-    
+
 uploaded_files = st.file_uploader("Upload DICOM Series", type=["dcm"], accept_multiple_files=True)
 
-# Initialize LLM Explainer
-# In a real app, we might use st.secrets or an input field.
-# Using the provided token for this session.
-HF_TOKEN = os.environ.get("HF_TOKEN")
-explainer = LLMExplainer(HF_TOKEN)
+explainer = load_explainer()
 
 if uploaded_files:
     # Display Stats
@@ -77,11 +73,18 @@ if uploaded_files:
             out.write(f.read())
             
     if st.button("Start Scan"):
-        with st.spinner("Scanning 3D Volume..."):
-            # Use default sensitivity (0.85)
-            detections, slices = scanner.scan(temp_dir)
-            st.session_state['scan_results'] = (detections, slices)
-            st.success(f"Scan Complete! Found {len(detections)} candidate regions.")
+        progress_bar = st.progress(0, text="Starting scan...")
+        status_text = st.empty()
+
+        def update_progress(fraction, message):
+            progress_bar.progress(fraction, text=message)
+            status_text.text(message)
+
+        detections, slices = scanner.scan(temp_dir, progress_callback=update_progress)
+        progress_bar.progress(1.0, text="Scan complete!")
+        status_text.empty()
+        st.session_state['scan_results'] = (detections, slices)
+        st.success(f"Scan Complete! Found {len(detections)} candidate regions.")
             
     if 'scan_results' in st.session_state:
         detections, slices = st.session_state['scan_results']
@@ -126,17 +129,20 @@ if uploaded_files:
             st.stop()
 
         slice_num = best_det['slice']
-        
 
         st.subheader(f"🔍 Primary Evidence ({final_status} Analysis)")
-        
+
         # Prepare Image for the top detection
         ds = slices[slice_num]
         img = scanner.normalize_slice(ds)
         img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        
-        # 1. Composite Heatmaps for ALL detections on this slice
+
+        # Generate Grad-CAM only for detections on the primary evidence slice
         slice_dets = [d for d in detections if d['slice'] == slice_num]
+        with st.spinner("Generating Grad-CAM heatmaps..."):
+            scanner.generate_heatmaps_for_slice(slice_dets)
+
+        # 1. Composite Heatmaps for ALL detections on this slice
         
         full_heatmap = np.zeros_like(img_bgr) # Black base
         
@@ -217,7 +223,7 @@ if uploaded_files:
             explanation_key = f"explain_{slice_num}_{best_det['score']}"
             if explanation_key not in st.session_state:
                 with st.spinner("Dr. Llama is analyzing this case..."):
-                    explanation = explainer.explain(best_det['label'], best_det['score'], ds.InstanceNumber)
+                    explanation = explainer.explain(best_det['label'], best_det['score'], ds.InstanceNumber, best_det['heatmap'])
                     st.session_state[explanation_key] = explanation
             
             st.info(st.session_state[explanation_key])
@@ -236,15 +242,16 @@ if uploaded_files:
         img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         
         current_detections = [d for d in detections if d['slice'] == slice_idx]
+        scanner.generate_heatmaps_for_slice(current_detections)
         for d in current_detections:
             x, y = d['x'], d['y']
             color = (0, 255, 0) if d['label'] == 'Real' else (0, 0, 255)
             cv2.rectangle(img_bgr, (x-32, y-32), (x+32, y+32), color, 2)
-            cv2.putText(img_bgr, f"{d['label']} {d['score']:.2f}", (x-30, y-35), 
+            cv2.putText(img_bgr, f"{d['label']} {d['score']:.2f}", (x-30, y-35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        
+
         st.image(img_bgr, caption=f"Slice {ds.InstanceNumber}", width="stretch", clamp=True)
-        
+
         if current_detections:
             st.warning(f"⚠️ Found {len(current_detections)} detections on this slice!")
             for i, d in enumerate(current_detections):
@@ -258,4 +265,4 @@ if uploaded_files:
                         if d['heatmap'] is not None:
                             st.image(d['heatmap'], caption="Grad-CAM Heatmap", width="stretch", clamp=True)
                         else:
-                            st.info("Heatmap not available for 3D models")
+                            st.info("Heatmap not available")

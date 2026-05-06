@@ -262,34 +262,38 @@ class FullScanDetector:
     def valiv_coords(self, x, y, h, w):
         return 0 <= x < w and 0 <= y < h
 
-    def scan(self, scan_dir, sensitivity=0.5, batch_size=16):
+    def scan(self, scan_dir, sensitivity=0.6, batch_size=32, slice_step=2, progress_callback=None):
         """Scans the full 3D volume using optimized Batch Processing."""
         slices = self.load_scan(scan_dir)
         if not slices: return [], []
-        
+
         all_detections = []
-        
-        print(f"Scanning {len(slices)} slices...")
-        
-        # OPTIMIZATION: Pre-load the entire volume to RAM
-        # This avoids re-reading/normalizing DICOMs for every single candidate
+
+        print(f"Scanning {len(slices)} slices (step={slice_step})...")
+
+        # Pre-load the entire volume to RAM
         print("Pre-loading 3D Volume (HU units)...")
         volume_hu = []
         for ds in slices:
-            volume_hu.append(self.get_hu(ds))  # Keep in HU units for proper normalization
-        
+            volume_hu.append(self.get_hu(ds))
+
         volume_hu = np.stack(volume_hu)  # (D, H, W) in HU units
         print(f"Volume Shape: {volume_hu.shape}")
-        
+
         # Buffers for batching
         cube_buffer = []
-        meta_buffer = [] # (slice_idx, x, y)
-        
+        meta_buffer = []
+
         # Temporary storage for detections before NMS
         raw_detections_by_slice = {i: [] for i in range(len(slices))}
-        
-        for i, ds in enumerate(slices):
-            # i = slice index
+
+        active_indices = list(range(0, len(slices), slice_step))
+        total = len(active_indices)
+
+        for step, i in enumerate(active_indices):
+            ds = slices[i]
+            if progress_callback:
+                progress_callback(step / total, f"Scanning slice {i+1}/{len(slices)}...")
             if i % 10 == 0:
                 print(f"Processing slice {i}/{len(slices)}...")
             
@@ -377,86 +381,89 @@ class FullScanDetector:
                     all_detections.append(d)
         
         # --- NEW: 3D Consistency Check ---
-        # Rule: Overlap in >= 2 slices -> Real. Else -> Fake.
-        # CHANGED: min_slices=2 (was 3) to allow "overlapping in multiple" where multiple >= 2.
-        # Widen distance threshold to 40 to ensure we catch shifting centers.
         all_detections = self.apply_3d_consistency(all_detections, dist_thresh=50, min_slices=2)
-                    
+
+        if progress_callback:
+            progress_callback(1.0, "Scan complete!")
+
+        # Store volume_hu on self so app.py can generate heatmaps on demand
+        self._last_volume_hu = volume_hu
+
         return all_detections, slices
 
-    def apply_3d_consistency(self, detections, dist_thresh=50, min_slices=2):
-        """
-        Groups detections and refines classification.
-        
-        Logic:
-        - If MODEL says "Fake" -> Keep as FM (False-Malicious, injected fake)
-        - If MODEL says "Real":
-            - Consistent across >= min_slices -> TM (True-Malicious, real cancer)
-            - Isolated (< min_slices) -> Filter out (likely noise or FB scar)
-        """
-        if not detections: return []
-        
-        # Separate Fake and Real detections
-        fake_detections = [d for d in detections if d['label'] == 'Fake']
-        real_detections = [d for d in detections if d['label'] == 'Real']
-        
-        # All Fake detections become FM (no consistency check needed)
-        for d in fake_detections:
-            d['label'] = 'FM'
-        
-        # For Real detections, apply 3D consistency grouping
-        if not real_detections:
-            return fake_detections
-            
-        real_detections.sort(key=lambda x: x['slice'])
-        n = len(real_detections)
+    def generate_heatmaps_for_slice(self, detections_on_slice):
+        """Generate Grad-CAM heatmaps only for detections on a specific slice (called on demand)."""
+        volume_hu = getattr(self, '_last_volume_hu', None)
+        if volume_hu is None:
+            return
+        for d in detections_on_slice:
+            if d['heatmap'] is None:
+                cube = self.extract_cube_from_volume(volume_hu, d['slice'], d['x'], d['y'], cube_size=32)
+                _, _, heatmap = self.classifier.predict(cube)
+                d['heatmap'] = heatmap
+
+    def _group_by_3d_consistency(self, detections, dist_thresh, min_slices):
+        """Groups detections spatially across slices. Returns only groups with >= min_slices."""
+        if not detections:
+            return []
+
+        detections = sorted(detections, key=lambda x: x['slice'])
+        n = len(detections)
         parent = list(range(n))
-        
+
         def find(i):
-            if parent[i] == i: return i
-            parent[i] = find(parent[i])
+            if parent[i] != i:
+                parent[i] = find(parent[i])
             return parent[i]
-            
+
         def union(i, j):
-            root_i = find(i)
-            root_j = find(j)
-            if root_i != root_j:
-                parent[root_j] = root_i
-                
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[rj] = ri
+
         for i in range(n):
-            for j in range(i+1, n):
-                d1 = real_detections[i]
-                d2 = real_detections[j]
-                
-                slice_diff = abs(d1['slice'] - d2['slice'])
-                if slice_diff > 3: 
-                    break 
-                
+            for j in range(i + 1, n):
+                slice_diff = abs(detections[i]['slice'] - detections[j]['slice'])
+                if slice_diff > 3:
+                    break
                 if slice_diff > 0:
-                    dist = np.sqrt((d1['x'] - d2['x'])**2 + (d1['y'] - d2['y'])**2)
+                    dist = np.sqrt((detections[i]['x'] - detections[j]['x'])**2 +
+                                   (detections[i]['y'] - detections[j]['y'])**2)
                     if dist < dist_thresh:
                         union(i, j)
-                        
-        # Analyze groups
+
         groups = {}
         for i in range(n):
             root = find(i)
-            if root not in groups: groups[root] = []
-            groups[root].append(real_detections[i])
-            
-        verified_real = []
-        for g_id, group in groups.items():
-            unique_slices = len(set(d['slice'] for d in group))
-            
-            # Only keep if consistent across multiple slices
-            if unique_slices >= min_slices:
-                for d in group:
-                    d['label'] = 'TM'  # True-Malicious (real cancer)
-                    d['score'] = 0.99
-                    verified_real.append(d)
-            # else: discard isolated "Real" detections (noise or FB scars)
-                
-        # Combine Fake (FM) and verified Real (TM)
-        return fake_detections + verified_real
+            groups.setdefault(root, []).append(detections[i])
+
+        verified = []
+        for group in groups.values():
+            if len(set(d['slice'] for d in group)) >= min_slices:
+                verified.extend(group)
+        return verified
+
+    def apply_3d_consistency(self, detections, dist_thresh=50, min_slices=2):
+        """
+        Both FM and TM require 3D consistency (appearing in >= min_slices) to be kept.
+        Single-slice detections are discarded as noise — real tampered nodules and
+        real cancer nodules both span multiple consecutive slices.
+        """
+        if not detections:
+            return []
+
+        fake_detections = [d for d in detections if d['label'] == 'Fake']
+        real_detections = [d for d in detections if d['label'] == 'Real']
+
+        verified_fake = self._group_by_3d_consistency(fake_detections, dist_thresh, min_slices)
+        for d in verified_fake:
+            d['label'] = 'FM'
+
+        verified_real = self._group_by_3d_consistency(real_detections, dist_thresh, min_slices)
+        for d in verified_real:
+            d['label'] = 'TM'
+            d['score'] = 0.99
+
+        return verified_fake + verified_real
 
 

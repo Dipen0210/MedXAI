@@ -232,11 +232,7 @@ class MedicalDeepfakeDetector:
             label = classes[class_idx]
             output[:, class_idx].backward()
 
-        # Generate heatmap (skip for 3D for now - causes OpenCV errors)
-        if self.is_3d:
-            heatmap = None  # Skip Grad-CAM for 3D
-        else:
-            heatmap = self._generate_gradcam(img_cv.shape[:2])
+        heatmap = self._generate_gradcam(img_cv.shape[:2])
         
         return label, score, heatmap
 
